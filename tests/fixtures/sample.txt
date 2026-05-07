@@ -1,0 +1,12 @@
+SYSTEM OVERVIEW
+
+The builder reads markdown and text files.
+
+PROCESS
+
+The pipeline maps structure, extracts concepts, extracts facts, and generates QA pairs.
+
+CONSTRAINTS
+
+Every answer must stay grounded in the source evidence.
+

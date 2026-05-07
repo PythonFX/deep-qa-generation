@@ -1,0 +1,92 @@
+project:
+  name: rag_qa_dataset
+  language: zh
+
+input:
+  file_types:
+    - .md
+    - .markdown
+    - .txt
+  encoding: utf-8
+
+llm:
+  enabled: true
+  profile: minimax-anthropic
+  model: MiniMax-M2.7-highspeed
+  config_path: /Users/vincent/.llm_client_models.yaml
+  temperature: 0.2
+  max_tokens: 8192
+  retry_times: 3
+  request_timeout_seconds: 120
+  prompt_version: v1
+
+structure:
+  markdown_heading_as_section: true
+  txt_section_detection: true
+  min_section_chars: 80
+  max_section_chars_for_single_llm_call: 50000
+
+concept_extraction:
+  max_concepts_per_doc: 80
+  min_importance: 0.4
+  include_aliases: true
+  merge_similar_concepts: true
+
+fact_extraction:
+  max_facts_per_concept: 20
+  min_confidence: 0.65
+  allowed_fact_types:
+    - definition
+    - claim
+    - constraint
+    - procedure
+    - comparison
+    - condition
+    - cause_effect
+    - numeric
+    - example
+    - warning
+    - decision
+    - config
+    - api_behavior
+
+combination:
+  max_facts_per_combination: 4
+  min_combination_score: 0.7
+  enabled_patterns:
+    - common_goal_with_mechanism_difference
+    - cause_effect_chain
+    - condition_action
+    - method_tradeoff
+    - concept_comparison
+    - procedure_chain
+    - troubleshooting
+    - constraint_reasoning
+
+qa_generation:
+  target_size: 200
+  question_language: zh
+  avoid_phrases:
+    - 根据文档
+    - 根据上文
+    - 文中提到
+  distribution:
+    single_fact: 0.25
+    concept_definition: 0.10
+    comparison: 0.15
+    cause_effect: 0.10
+    procedure: 0.10
+    constraint: 0.10
+    scenario: 0.10
+    multi_fact_synthesis: 0.10
+
+validation:
+  enabled: true
+  min_overall_score: 4.0
+  require_answerability: true
+  require_faithfulness: true
+  reject_ambiguous_question: true
+  reject_external_knowledge: true
+  deduplicate_questions: true
+  duplicate_similarity_threshold: 0.88
+
