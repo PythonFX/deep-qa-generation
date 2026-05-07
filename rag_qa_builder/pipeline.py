@@ -5,9 +5,8 @@ from typing import Any
 
 from rag_qa_builder.analyzer.fact_combination_analyzer import analyze_fact_combinations
 from rag_qa_builder.compiler.concept_canonicalizer import canonicalize_concepts
-from rag_qa_builder.compiler.concept_extractor import extract_concepts
 from rag_qa_builder.compiler.evidence_binder import bind_and_deduplicate_evidence
-from rag_qa_builder.compiler.fact_extractor import extract_facts
+from rag_qa_builder.compiler.section_knowledge_extractor import SectionKnowledgeBundle, extract_section_knowledge
 from rag_qa_builder.compiler.structure_mapper import map_documents_to_sections
 from rag_qa_builder.config import AppConfig
 from rag_qa_builder.exporters.json_exporter import export_json
@@ -17,9 +16,10 @@ from rag_qa_builder.generator.question_blueprint_generator import build_question
 from rag_qa_builder.graph.concept_fact_graph import build_graph_payload
 from rag_qa_builder.graph.graph_builder import build_concept_fact_relations
 from rag_qa_builder.llm.prompt_runner import PromptRunner
-from rag_qa_builder.models import DatasetEntry, Evidence, QAPair
+from rag_qa_builder.models import Concept, DatasetEntry, Evidence, Fact, QAPair
 from rag_qa_builder.readers import read_documents
 from rag_qa_builder.utils.json_utils import dump_jsonl
+from rag_qa_builder.utils.text_utils import normalize_text
 from rag_qa_builder.validator import validate_qa_pairs
 
 
@@ -34,6 +34,8 @@ class Pipeline:
             self.config.llm.enabled = False
         self.prompt_runner = PromptRunner(config, self.output_dir)
         self.errors: list[dict[str, Any]] = []
+        self._section_knowledge_bundle: SectionKnowledgeBundle | None = None
+        self._raw_concepts: list[Concept] = []
 
     def build_structure(self) -> tuple[list, list]:
         documents, read_errors = read_documents(self.input_path, self.config.input.file_types, self.config.input.encoding)
@@ -45,14 +47,18 @@ class Pipeline:
         return documents, sections
 
     def extract_concepts(self, documents: list, sections: list) -> list:
-        raw = extract_concepts(documents, sections, self.config, self.prompt_runner)
-        canonicalized = canonicalize_concepts(raw)
-        export_json(self.output_dir, "concepts.raw.json", raw)
+        bundle = self._get_section_knowledge(sections)
+        self._raw_concepts = bundle.concepts
+        canonicalized = canonicalize_concepts(bundle.concepts)
+        export_json(self.output_dir, "concepts.raw.json", bundle.concepts)
         export_json(self.output_dir, "concepts.json", canonicalized)
         return canonicalized
 
     def extract_facts(self, concepts: list, sections: list) -> tuple[list, list]:
-        facts_raw, evidence_raw = extract_facts(concepts, sections, self.config, self.prompt_runner)
+        bundle = self._get_section_knowledge(sections)
+        self._raw_concepts = self._raw_concepts or bundle.concepts
+        facts_raw = self._remap_facts_to_canonical_concepts(bundle.facts, self._raw_concepts, concepts)
+        evidence_raw = bundle.evidences
         facts, evidence = bind_and_deduplicate_evidence(facts_raw, evidence_raw)
         export_json(self.output_dir, "facts.raw.json", facts_raw)
         export_json(self.output_dir, "evidence.raw.json", evidence_raw)
@@ -141,3 +147,40 @@ class Pipeline:
         if self.errors:
             dump_jsonl(self.output_dir / "errors.jsonl", self.errors)
 
+    def _get_section_knowledge(self, sections: list) -> SectionKnowledgeBundle:
+        if self._section_knowledge_bundle is None:
+            self._section_knowledge_bundle = extract_section_knowledge(sections, self.config, self.prompt_runner)
+        return self._section_knowledge_bundle
+
+    def _remap_facts_to_canonical_concepts(
+        self,
+        facts: list[Fact],
+        raw_concepts: list[Concept],
+        canonical_concepts: list[Concept],
+    ) -> list[Fact]:
+        raw_id_to_name = {concept.concept_id: concept.canonical_name for concept in raw_concepts}
+        name_to_canonical_id: dict[str, str] = {}
+        for concept in canonical_concepts:
+            name_to_canonical_id[normalize_text(concept.canonical_name)] = concept.concept_id
+            for alias in concept.aliases:
+                name_to_canonical_id[normalize_text(alias)] = concept.concept_id
+
+        remapped: list[Fact] = []
+        for fact in facts:
+            subject_name = fact.metadata.get("subject_concept_name") or raw_id_to_name.get(fact.subject_concept_id or "", "")
+            subject_id = name_to_canonical_id.get(normalize_text(subject_name))
+            if not subject_id:
+                continue
+            fact.subject_concept_id = subject_id
+            related_names = fact.metadata.get("related_concept_names", [])
+            if isinstance(related_names, str):
+                related_names = [related_names]
+            fact.related_concept_ids = sorted(
+                {
+                    name_to_canonical_id[normalize_text(name)]
+                    for name in related_names
+                    if normalize_text(name) in name_to_canonical_id and name_to_canonical_id[normalize_text(name)] != subject_id
+                }
+            )
+            remapped.append(fact)
+        return remapped

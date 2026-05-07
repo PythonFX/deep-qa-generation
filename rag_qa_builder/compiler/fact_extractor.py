@@ -8,6 +8,8 @@ from rag_qa_builder.models import Concept, DocumentSection, Evidence, Fact
 from rag_qa_builder.utils.ids import stable_id
 from rag_qa_builder.utils.text_utils import normalize_text, split_sentences
 
+MAX_LLM_FACT_CALLS = 8
+
 
 def extract_facts(
     concepts: list[Concept],
@@ -18,8 +20,9 @@ def extract_facts(
     section_lookup = {section.section_id: section for section in sections}
     facts: list[Fact] = []
     evidences: list[Evidence] = []
+    ranked_concepts = sorted(concepts, key=lambda item: item.importance, reverse=True)
 
-    for concept in concepts:
+    for index, concept in enumerate(ranked_concepts):
         concept_sections = [section_lookup[section_id] for section_id in concept.source_section_ids if section_id in section_lookup]
         used = 0
         for section in concept_sections:
@@ -34,6 +37,8 @@ def extract_facts(
                     evidences.append(evidence)
                     facts.append(fact)
                     used += 1
+        if index >= MAX_LLM_FACT_CALLS or not concept_sections:
+            continue
         llm_result = prompt_runner.maybe_run_json(
             "extract_facts",
             "Extract atomic facts about the target concept. Return JSON with top-level 'facts'. Every fact must be directly supported by evidence. No external knowledge.",

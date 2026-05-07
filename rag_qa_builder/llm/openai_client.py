@@ -34,6 +34,7 @@ class CachedLLMClient(JSONLLM):
             json.dumps(
                 {
                     "prompt_name": prompt_name,
+                    "system": system,
                     "model": self.config.model,
                     "profile": self.config.profile,
                     "payload": payload,

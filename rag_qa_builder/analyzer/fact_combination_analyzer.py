@@ -9,6 +9,9 @@ from rag_qa_builder.config import AppConfig
 from rag_qa_builder.models import Fact, FactCombination
 from rag_qa_builder.utils.ids import stable_id
 
+MAX_FACTS_PER_CONCEPT_FOR_COMBINATIONS = 6
+MAX_TOTAL_COMBINATIONS = 2000
+
 
 def analyze_fact_combinations(facts: list[Fact], config: AppConfig) -> list[FactCombination]:
     by_concept: dict[str, list[Fact]] = defaultdict(list)
@@ -18,8 +21,13 @@ def analyze_fact_combinations(facts: list[Fact], config: AppConfig) -> list[Fact
 
     combinations_found: list[FactCombination] = []
     for concept_id, concept_facts in by_concept.items():
-        for size in range(1, min(len(concept_facts), config.combination.max_facts_per_combination) + 1):
-            for group in combinations(concept_facts, size):
+        ranked_facts = sorted(
+            concept_facts,
+            key=lambda item: (item.importance, item.confidence, len(item.statement)),
+            reverse=True,
+        )[:MAX_FACTS_PER_CONCEPT_FOR_COMBINATIONS]
+        for size in range(1, min(len(ranked_facts), config.combination.max_facts_per_combination) + 1):
+            for group in combinations(ranked_facts, size):
                 pattern = infer_pattern(list(group))
                 score = round(sum(fact.confidence for fact in group) / len(group), 3)
                 if score < config.combination.min_combination_score:
@@ -39,8 +47,11 @@ def analyze_fact_combinations(facts: list[Fact], config: AppConfig) -> list[Fact
                         score=score,
                     )
                 )
+                if len(combinations_found) >= MAX_TOTAL_COMBINATIONS:
+                    combinations_found.sort(key=lambda item: (-item.score, -len(item.fact_ids)))
+                    return combinations_found[:MAX_TOTAL_COMBINATIONS]
     combinations_found.sort(key=lambda item: (-item.score, -len(item.fact_ids)))
-    return combinations_found
+    return combinations_found[:MAX_TOTAL_COMBINATIONS]
 
 
 def _expected_question_type(pattern: str) -> str:
@@ -52,4 +63,3 @@ def _expected_question_type(pattern: str) -> str:
         "procedure_chain": "procedure",
     }
     return mapping.get(pattern, "multi_fact_synthesis")
-

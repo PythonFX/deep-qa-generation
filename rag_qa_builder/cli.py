@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from rag_qa_builder.config import load_config
+from rag_qa_builder.deep_qa_pipeline import DeepQAPipeline
 from rag_qa_builder.pipeline import Pipeline
 from rag_qa_builder.utils.logging import console
 
@@ -33,6 +34,34 @@ def generate(
     _maybe_prepare_output(output, force, resume)
     result = pipeline.generate_all()
     console.print(f"[green]Done[/green] docs={len(result['documents'])} concepts={len(result['concepts'])} facts={len(result['facts'])} dataset={len(result['dataset'])}")
+
+
+def generate_deep(
+    input_path: str,
+    output: str,
+    config_path: str | None = None,
+    language: str | None = None,
+    target_size: int | None = None,
+    force: bool = False,
+    resume: bool = False,
+    dry_run: bool = False,
+) -> None:
+    config = load_config(config_path)
+    if language:
+        config.project.language = language
+        config.qa_generation.question_language = language
+    if target_size:
+        config.qa_generation.target_size = target_size
+    _maybe_prepare_output(output, force, resume)
+    pipeline = DeepQAPipeline(input_path=input_path, output_dir=output, config=config, dry_run=dry_run)
+    result = pipeline.generate_all()
+    console.print(
+        "[green]Done[/green] "
+        f"docs={len(result['documents'])} "
+        f"evidence_cards={len(result['evidence_cards'])} "
+        f"question_plans={len(result['question_plans'])} "
+        f"dataset={len(result['dataset'])}"
+    )
 
 
 def build_structure(
@@ -173,6 +202,13 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--force", action="store_true")
     generate_parser.add_argument("--resume", action="store_true")
 
+    generate_deep_parser = subparsers.add_parser("generate-deep")
+    add_common_arguments(generate_deep_parser)
+    generate_deep_parser.add_argument("--language")
+    generate_deep_parser.add_argument("--target-size", type=int)
+    generate_deep_parser.add_argument("--force", action="store_true")
+    generate_deep_parser.add_argument("--resume", action="store_true")
+
     for name in [
         "build-structure",
         "extract-concepts",
@@ -193,6 +229,17 @@ def main(argv: list[str] | None = None) -> int:
     command = args.command
     if command == "generate":
         generate(
+            input_path=args.input,
+            output=args.output,
+            config_path=args.config,
+            language=args.language,
+            target_size=args.target_size,
+            force=args.force,
+            resume=args.resume,
+            dry_run=args.dry_run,
+        )
+    elif command == "generate-deep":
+        generate_deep(
             input_path=args.input,
             output=args.output,
             config_path=args.config,

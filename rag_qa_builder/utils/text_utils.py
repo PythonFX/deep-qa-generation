@@ -21,8 +21,37 @@ def similarity(left: str, right: str) -> float:
 
 
 def split_sentences(text: str) -> list[str]:
-    parts = re.split(r"(?<=[。！？!?\.])\s+|\n+", text)
+    parts = re.split(r"(?<=[。！？!?\.])\s+", text)
     return [part.strip() for part in parts if part.strip()]
+
+
+def unwrap_line_breaks(text: str) -> str:
+    text = text.replace("\r\n", "\n")
+    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+    paragraphs = re.split(r"\n\s*\n", text)
+    cleaned: list[str] = []
+    for paragraph in paragraphs:
+        lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+        if not lines:
+            continue
+        merged = lines[0]
+        for line in lines[1:]:
+            if _should_keep_line_break(merged, line):
+                merged += "\n" + line
+            else:
+                merged += " " + line
+        cleaned.append(merged.strip())
+    return "\n\n".join(cleaned)
+
+
+def _should_keep_line_break(prev: str, current: str) -> bool:
+    if re.match(r"^(#{1,6}\s+|\d+[\.\)]\s+)", current):
+        return True
+    if current.isupper() and len(current) <= 80:
+        return True
+    if len(prev) < 40 and len(current) < 40:
+        return True
+    return False
 
 
 def keywords(text: str, limit: int = 8) -> list[str]:
@@ -38,4 +67,3 @@ def keywords(text: str, limit: int = 8) -> list[str]:
 
 def contains_cjk(text: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fff]", text))
-
