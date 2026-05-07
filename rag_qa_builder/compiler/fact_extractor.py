@@ -42,7 +42,7 @@ def extract_facts(
                 "sections": [section.model_dump(mode="json") for section in concept_sections[:10]],
             },
         )
-        for item in (llm_result or {}).get("facts", []):
+        for item in _normalize_fact_items(llm_result):
             statement = item.get("statement")
             evidence_text = item.get("evidence")
             if not statement or not evidence_text or not concept_sections:
@@ -66,6 +66,35 @@ def extract_facts(
                 evidences.append(evidence)
                 facts.append(fact)
     return facts, evidences
+
+
+def _normalize_fact_items(llm_result: dict | None) -> list[dict]:
+    if not isinstance(llm_result, dict):
+        return []
+    raw_items = llm_result.get("facts", [])
+    if isinstance(raw_items, dict):
+        raw_items = raw_items.get("items", []) or raw_items.get("facts", [])
+    if not isinstance(raw_items, list):
+        return []
+
+    normalized: list[dict] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            statement = item.strip()
+            if statement:
+                normalized.append({"statement": statement, "evidence": statement})
+            continue
+        if not isinstance(item, dict):
+            continue
+        if "fact" in item and isinstance(item["fact"], str) and "statement" not in item:
+            item = {**item, "statement": item["fact"]}
+        if "text" in item and isinstance(item["text"], str) and "statement" not in item:
+            item = {**item, "statement": item["text"]}
+        if "evidence" not in item:
+            fallback_evidence = item.get("evidence_text") or item.get("quote") or item.get("statement")
+            item = {**item, "evidence": fallback_evidence}
+        normalized.append(item)
+    return normalized
 
 
 def _make_fact(concept: Concept, sentence: str, evidence_id: str) -> Fact:
@@ -129,4 +158,3 @@ def _estimate_confidence(sentence: str) -> float:
     if any(token in sentence for token in ["必须", "不能", "因为", "导致", "例如", "包括", "is", "are"]):
         value += 0.1
     return min(value, 0.95)
-

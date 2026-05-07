@@ -37,22 +37,58 @@ def extract_concepts(
             "Extract core concepts from the document. Return JSON with a top-level 'concepts' array only. Do not use external knowledge.",
             llm_payload,
         )
-        for item in (llm_result or {}).get("concepts", []):
+        for item in _normalize_concept_items(llm_result):
             name = item.get("name") or item.get("canonical_name")
             if not name:
                 continue
+            aliases = item.get("aliases", [])
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            elif not isinstance(aliases, list):
+                aliases = []
+            source_section_ids = item.get("source_section_ids", [])
+            if isinstance(source_section_ids, str):
+                source_section_ids = [source_section_ids]
+            elif not isinstance(source_section_ids, list):
+                source_section_ids = []
             raw.append(
                 Concept(
                     concept_id=stable_id("concept", f"{document.doc_id}:{name}"),
                     canonical_name=name,
-                    aliases=item.get("aliases", []),
+                    aliases=aliases,
                     concept_type=item.get("concept_type", "other"),
                     definition=item.get("definition"),
                     importance=float(item.get("importance", 0.6)),
-                    source_section_ids=item.get("source_section_ids", []),
+                    source_section_ids=source_section_ids,
                 )
             )
     return raw
+
+
+def _normalize_concept_items(llm_result: dict | None) -> list[dict]:
+    if not isinstance(llm_result, dict):
+        return []
+    raw_items = llm_result.get("concepts", [])
+    if isinstance(raw_items, dict):
+        raw_items = raw_items.get("items", []) or raw_items.get("concepts", [])
+    if not isinstance(raw_items, list):
+        return []
+
+    normalized: list[dict] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            name = item.strip()
+            if name:
+                normalized.append({"name": name})
+            continue
+        if not isinstance(item, dict):
+            continue
+        if "concept" in item and isinstance(item["concept"], str) and "name" not in item:
+            item = {**item, "name": item["concept"]}
+        if "canonical_name" in item and "name" not in item:
+            item = {**item, "name": item["canonical_name"]}
+        normalized.append(item)
+    return normalized
 
 
 def _extract_heuristic_concepts(document: Document, sections: list[DocumentSection], config: AppConfig) -> list[Concept]:
@@ -106,4 +142,3 @@ def _find_definition(name: str, text: str) -> str | None:
         if match:
             return match.group(1).strip()
     return None
-
