@@ -1,6 +1,7 @@
 .env
 .DS_Store
 output/
+dataset.deep.final*.jsonl
 
 state/
 

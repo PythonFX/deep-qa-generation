@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -247,8 +246,18 @@ class DeepQAPipeline:
                     "requirements": {
                         "target": "Create difficult but answerable RAG benchmark question plans.",
                         "self_contained_question": (
-                            "The question must explicitly include the concrete subject and event/topic. "
-                            "It must still make sense if shown alone to a RAG system."
+                            "The question must name the central subject, entity, method, event, or comparison target. "
+                            "It must still make sense if shown alone to a RAG system, but it should not quote every answer point."
+                        ),
+                        "multi_card_rule": (
+                            "Use multiple cards only when their relationship is explicitly supported by shared subject, "
+                            "overlapping source terms, causal/contrast/condition links, or the same local argument chain. "
+                            "If the relationship is unclear, create separate single-card questions instead of forcing synthesis."
+                        ),
+                        "natural_question_style": (
+                            "Write like a real user query for retrieval. Prefer concise, natural questions such as "
+                            "'What makes the Transformer better than recurrent neural networks?' over over-specified questions "
+                            "that list every mechanism in parentheses. Do not give away all answer components in the question."
                         ),
                         "avoid": sorted(VAGUE_QUESTION_PATTERNS),
                         "preferred_question_types": [
@@ -264,9 +273,10 @@ class DeepQAPipeline:
                         "plans": [
                             {
                                 "card_ids": ["card id(s) used"],
-                                "question": "standalone question with explicit subject and event/topic",
+                                "question": "natural standalone RAG question that is specific enough to retrieve context but not over-specified",
                                 "question_type": "why_mechanism",
                                 "reasoning_task": "what reasoning the answer must perform",
+                                "relation_rationale": "why the selected cards truly belong together, if more than one card is used",
                                 "expected_answer_points": ["grounded answer point"],
                                 "difficulty": "medium|hard",
                                 "quality_score": 0.0,
@@ -276,11 +286,8 @@ class DeepQAPipeline:
                 },
             )
             batch_plans = _parse_question_plans(llm_payload, {card.card_id: card for card in batch})
-            if not batch_plans:
-                batch_plans = _heuristic_question_plans(batch)
             plans.extend(batch_plans)
 
-        plans.extend(_cross_card_synthesis_plans(selected_cards))
         plans = _deduplicate_plans(plans, {card.card_id: card for card in selected_cards})
         plans = plans[: self.config.qa_generation.target_size * 3]
         export_json(self.output_dir, "question_plans.deep.json", plans)
@@ -432,8 +439,11 @@ def _evidence_card_system_prompt() -> str:
 def _question_plan_system_prompt() -> str:
     return (
         "You design RAG benchmark questions from evidence cards. "
-        "Each question must be self-contained: it must name the concrete subject and the concrete event, design choice, result, or claim. "
+        "Each question must be self-contained enough for retrieval: it must name the central subject, method, entity, event, or comparison target. "
         "Never ask abstract questions like '综合多个事实回答真实问题' or '这些概念有什么区别'. "
+        "Do not over-specify the question by listing every mechanism, condition, or answer point. "
+        "A strong RAG benchmark question sounds like a real user query: concise, natural, and broad enough that the system must retrieve and synthesize the relevant context. "
+        "For example, prefer 'What mechanisms make the Transformer architecture better than recurrent neural networks?' over a question that enumerates every mechanism in parentheses. "
         "Favor questions requiring explanation, causal reasoning, condition/boundary analysis, tradeoff comparison, result interpretation, or multi-card synthesis. "
         "Every question must be answerable using only the supplied cards. Return JSON only."
     )
@@ -672,11 +682,15 @@ def _parse_question_plans(payload: dict[str, Any] | None, card_lookup: dict[str,
         if not isinstance(item, dict):
             continue
         card_ids = [card_id for card_id in _normalize_string_list(item.get("card_ids", [])) if card_id in card_lookup]
-        question = _clean_question(item.get("question", ""))
-        if not card_ids or not question:
+        if not card_ids:
             continue
         plan_cards = [card_lookup[card_id] for card_id in card_ids]
+        question = _polish_rag_question(_clean_question(item.get("question", "")), plan_cards)
+        if not question:
+            continue
         if not _question_is_self_contained(question, plan_cards):
+            continue
+        if not _cards_form_supported_cluster(plan_cards):
             continue
         plan_id = stable_id("deep_plan", f"{question}:{'|'.join(card_ids)}")
         plans.append(
@@ -689,65 +703,9 @@ def _parse_question_plans(payload: dict[str, Any] | None, card_lookup: dict[str,
                 expected_answer_points=_normalize_string_list(item.get("expected_answer_points", [])),
                 difficulty=_normalize_difficulty(item.get("difficulty", "medium")),
                 quality_score=_safe_float(item.get("quality_score", 0.8), 0.8),
-                metadata={"source": "llm"},
+                metadata={"source": "llm", "relation_rationale": _clean_long_text(item.get("relation_rationale", ""))},
             )
         )
-    return plans
-
-
-def _heuristic_question_plans(cards: list[EvidenceCard]) -> list[QuestionPlan]:
-    plans: list[QuestionPlan] = []
-    for card in cards:
-        question_type, question = _question_for_card(card)
-        if not _question_is_self_contained(question, [card]):
-            continue
-        plans.append(
-            QuestionPlan(
-                plan_id=stable_id("deep_plan", f"{card.card_id}:{question}"),
-                card_ids=[card.card_id],
-                question=question,
-                question_type=question_type,
-                reasoning_task=_reasoning_task_for_type(question_type),
-                expected_answer_points=[card.claim],
-                difficulty="hard" if card.reasoning_depth >= 0.75 else "medium",
-                quality_score=card.quality_score,
-                metadata={"source": "heuristic"},
-            )
-        )
-    return plans
-
-
-def _cross_card_synthesis_plans(cards: list[EvidenceCard]) -> list[QuestionPlan]:
-    by_section: dict[str, list[EvidenceCard]] = defaultdict(list)
-    for card in cards:
-        by_section[card.section_id].append(card)
-    plans: list[QuestionPlan] = []
-    for section_cards in by_section.values():
-        ranked = sorted(section_cards, key=lambda item: item.quality_score, reverse=True)[:6]
-        for left_index, left in enumerate(ranked):
-            for right in ranked[left_index + 1 :]:
-                if not _cards_can_synthesize(left, right):
-                    continue
-                question = (
-                    f"文章中{left.subject}关于{left.event_or_topic}的论述，"
-                    f"和{right.subject}关于{right.event_or_topic}的论述之间有什么因果、取舍或边界关系？"
-                )
-                if not _question_is_self_contained(question, [left, right]):
-                    continue
-                plans.append(
-                    QuestionPlan(
-                        plan_id=stable_id("deep_plan", f"{left.card_id}:{right.card_id}:{question}"),
-                        card_ids=[left.card_id, right.card_id],
-                        question=question,
-                        question_type="multi_step_synthesis",
-                        reasoning_task="综合两张证据卡，解释它们之间的因果、取舍或边界关系。",
-                        expected_answer_points=[left.claim, right.claim],
-                        difficulty="hard",
-                        quality_score=round((left.quality_score + right.quality_score) / 2 + 0.1, 3),
-                        metadata={"source": "heuristic_cross_card"},
-                    )
-                )
-                break
     return plans
 
 
@@ -830,20 +788,6 @@ def _card_payload(card: EvidenceCard) -> dict[str, Any]:
     }
 
 
-def _question_for_card(card: EvidenceCard) -> tuple[str, str]:
-    subject = card.subject
-    topic = card.event_or_topic
-    if card.card_type in {"mechanism", "cause_effect", "procedure_logic"}:
-        return "why_mechanism", f"文章如何解释{subject}在{topic}中的作用机制或因果逻辑？"
-    if card.card_type == "contrast_tradeoff":
-        return "compare_tradeoff", f"文章如何分析{subject}在{topic}上的取舍，关键差异会带来什么影响？"
-    if card.card_type == "condition_boundary":
-        return "condition_boundary", f"文章指出{subject}在{topic}上有哪些条件或边界限制，这些限制为什么重要？"
-    if card.card_type in {"implication", "evidence_result"}:
-        return "result_interpretation", f"文章中{subject}关于{topic}的结果或结论意味着什么，依据是什么？"
-    return "multi_step_synthesis", f"文章中{subject}关于{topic}的核心论述是什么，它依赖哪些证据或理由？"
-
-
 def _question_is_self_contained(question: str, cards: list[EvidenceCard]) -> bool:
     normalized = normalize_text(question)
     if len(question.strip()) < 18:
@@ -851,6 +795,8 @@ def _question_is_self_contained(question: str, cards: list[EvidenceCard]) -> boo
     if any(pattern in question for pattern in VAGUE_QUESTION_PATTERNS):
         return False
     if not cards:
+        return False
+    if _question_is_over_specific(question):
         return False
     subject_hits = 0
     topic_hits = 0
@@ -861,7 +807,88 @@ def _question_is_self_contained(question: str, cards: list[EvidenceCard]) -> boo
             subject_hits += 1
         if topic and (topic in normalized or _loose_overlap(topic, normalized)):
             topic_hits += 1
-    return subject_hits >= 1 and topic_hits >= 1
+
+    if subject_hits >= 1 and topic_hits >= 1:
+        return True
+
+    # Natural RAG questions often name the broader entity/comparison instead of
+    # repeating every evidence-card topic. Accept them when they retain enough
+    # domain anchors from the bound cards.
+    question_tokens = set(_tokens(question))
+    card_anchor_tokens = set(
+        token
+        for card in cards
+        for token in _tokens(" ".join([card.subject, card.event_or_topic, card.claim]))
+        if _is_anchor_token(token)
+    )
+    anchor_overlap = question_tokens & card_anchor_tokens
+    has_reasoning_shape = any(term in question.lower() for term in ["why", "what", "how", "mechanism", "makes", "better", "compare"])
+    has_reasoning_shape = has_reasoning_shape or any(term in question for term in ["为什么", "什么", "如何", "机制", "更好", "优势", "比较"])
+    has_broad_entity = any(term in normalized for term in ["transformer", "architecture", "system", "model", "framework", "pipeline", "架构", "系统", "模型", "方法"])
+    if len(cards) > 1 and len(anchor_overlap) >= 1 and has_reasoning_shape and has_broad_entity:
+        return True
+    return len(anchor_overlap) >= 2 and has_reasoning_shape
+
+
+def _polish_rag_question(question: str, cards: list[EvidenceCard]) -> str:
+    question = _clean_question(question)
+    if not question:
+        return ""
+
+    # Remove long parenthetical answer previews. Short clarifications like RNNs
+    # are fine, but long lists make the question unnatural and leak the answer.
+    question = re.sub(r"\s*\([^?()]{35,}\)", "", question)
+    question = re.sub(r"\s+", " ", question).strip()
+
+    match = re.match(
+        r"^Why does (.+?) require (?:three|several|multiple|distinct|\d+)?\s*.*?mechanisms?.*? over (.+?)\??$",
+        question,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        subject = match.group(1).strip()
+        comparator = match.group(2).strip()
+        question = f"What mechanisms make {subject} better than {comparator}?"
+
+    match = re.match(
+        r"^Why does (.+?) achieve (?:its )?performance advantages over (.+?)\??$",
+        question,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        question = f"What makes {match.group(1).strip()} better than {match.group(2).strip()}?"
+
+    if _question_is_over_specific(question):
+        simplified = _simplify_over_specific_question(question, cards)
+        if simplified:
+            question = simplified
+
+    return _clean_question(question)
+
+
+def _question_is_over_specific(question: str) -> bool:
+    comma_count = question.count(",") + question.count("，")
+    has_long_parenthetical = bool(re.search(r"\([^?()]{35,}\)", question))
+    too_many_and_phrases = len(re.findall(r"\b(?:and|with|via|through)\b", question, flags=re.IGNORECASE)) >= 4
+    return has_long_parenthetical or comma_count >= 4 or too_many_and_phrases
+
+
+def _simplify_over_specific_question(question: str, cards: list[EvidenceCard]) -> str:
+    if not cards:
+        return ""
+    subjects = [card.subject for card in cards if _specific_enough(card.subject)]
+    claims = " ".join(card.claim for card in cards).lower()
+    question_lower = question.lower()
+    if "transformer" in question_lower or "transformer" in claims:
+        if "recurrent" in question_lower or "rnn" in question_lower or "recurrent" in claims:
+            if any(card.card_type in {"mechanism", "cause_effect", "core_claim"} for card in cards):
+                return "What mechanisms make the Transformer architecture better than recurrent neural networks?"
+            return "What makes the Transformer architecture better than recurrent neural networks?"
+    if len(set(subjects)) == 1:
+        return f"What explains {subjects[0]}'s main advantage in the article?"
+    if subjects:
+        return f"How are {subjects[0]} and {subjects[1] if len(subjects) > 1 else 'the related mechanism'} connected in the article?"
+    return ""
 
 
 def _answer_is_grounded(answer: str, evidence: list[EvidenceSpan], cards: list[EvidenceCard]) -> bool:
@@ -909,6 +936,8 @@ def _deduplicate_plans(plans: list[QuestionPlan], card_lookup: dict[str, Evidenc
         cards = [card_lookup[card_id] for card_id in plan.card_ids if card_id in card_lookup]
         if not _question_is_self_contained(plan.question, cards):
             continue
+        if not _cards_form_supported_cluster(cards):
+            continue
         if any(similarity(plan.question, existing.question) > 0.86 for existing in unique):
             continue
         unique.append(plan)
@@ -918,11 +947,69 @@ def _deduplicate_plans(plans: list[QuestionPlan], card_lookup: dict[str, Evidenc
 def _cards_can_synthesize(left: EvidenceCard, right: EvidenceCard) -> bool:
     if left.card_id == right.card_id:
         return False
-    if left.subject == right.subject:
+
+    same_local_argument = left.section_id == right.section_id and left.subject == right.subject
+    claim_overlap = _token_overlap(left.claim, right.claim)
+    topic_overlap = _token_overlap(left.event_or_topic, right.event_or_topic)
+    cross_mentions = _card_cross_mentions(left, right)
+    compatible_reasoning_types = _compatible_reasoning_types(left.card_type, right.card_type)
+
+    if same_local_argument and (claim_overlap >= 0.16 or topic_overlap >= 0.25 or compatible_reasoning_types or cross_mentions):
         return True
-    if left.card_type != right.card_type and (left.synthesis_potential + right.synthesis_potential) >= 1.2:
+
+    if cross_mentions and (claim_overlap >= 0.12 or topic_overlap >= 0.2):
         return True
-    return _token_overlap(left.claim, right.claim) >= 0.18
+
+    if claim_overlap >= 0.28 or topic_overlap >= 0.4:
+        return True
+
+    return False
+
+
+def _cards_form_supported_cluster(cards: list[EvidenceCard]) -> bool:
+    if len(cards) <= 1:
+        return True
+    if len(cards) > 4:
+        return False
+    connected = {cards[0].card_id}
+    remaining = cards[1:]
+    while remaining:
+        progressed = False
+        for card in list(remaining):
+            if any(_cards_can_synthesize(card, other) for other in cards if other.card_id in connected):
+                connected.add(card.card_id)
+                remaining.remove(card)
+                progressed = True
+        if not progressed:
+            return False
+    return True
+
+
+def _card_cross_mentions(left: EvidenceCard, right: EvidenceCard) -> bool:
+    left_text = normalize_text(" ".join([left.claim, left.event_or_topic, left.subject]))
+    right_text = normalize_text(" ".join([right.claim, right.event_or_topic, right.subject]))
+    left_subject = normalize_text(left.subject)
+    right_subject = normalize_text(right.subject)
+    left_topic = normalize_text(left.event_or_topic)
+    right_topic = normalize_text(right.event_or_topic)
+    return (
+        bool(right_subject and right_subject in left_text)
+        or bool(left_subject and left_subject in right_text)
+        or bool(right_topic and _loose_overlap(right_topic, left_text))
+        or bool(left_topic and _loose_overlap(left_topic, right_text))
+    )
+
+
+def _compatible_reasoning_types(left_type: str, right_type: str) -> bool:
+    compatible = {
+        frozenset({"cause_effect", "implication"}),
+        frozenset({"mechanism", "implication"}),
+        frozenset({"condition_boundary", "mechanism"}),
+        frozenset({"condition_boundary", "cause_effect"}),
+        frozenset({"contrast_tradeoff", "implication"}),
+        frozenset({"evidence_result", "implication"}),
+    }
+    return frozenset({left_type, right_type}) in compatible
 
 
 def _normalize_card_type(value: Any) -> str:
@@ -1019,17 +1106,6 @@ def _reasoning_hook_for_type(card_type: str) -> str:
         "procedure_logic": "需要解释步骤顺序和作用。",
     }
     return mapping.get(card_type, "需要基于证据综合文章的核心论述。")
-
-
-def _reasoning_task_for_type(question_type: str) -> str:
-    mapping = {
-        "why_mechanism": "解释文章中给出的机制、原因和影响。",
-        "cause_effect": "串联文章中的原因、过程和结果。",
-        "compare_tradeoff": "比较文章中明确提出的差异、取舍和影响。",
-        "condition_boundary": "识别文章中的条件、限制和适用边界。",
-        "result_interpretation": "解释文章结果或结论的含义及依据。",
-    }
-    return mapping.get(question_type, "综合文章证据回答非表层问题。")
 
 
 def _best_source_span(source: str, span: str) -> str:
@@ -1187,6 +1263,29 @@ def _loose_overlap(topic: str, normalized_question: str) -> bool:
 def _tokens(text: str) -> list[str]:
     normalized = normalize_text(text)
     return re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}|[\u4e00-\u9fff]{2,}", normalized)
+
+
+def _is_anchor_token(token: str) -> bool:
+    generic = {
+        "the",
+        "and",
+        "with",
+        "that",
+        "this",
+        "from",
+        "into",
+        "their",
+        "there",
+        "because",
+        "文章",
+        "什么",
+        "如何",
+        "为什么",
+        "这个",
+        "这些",
+        "其中",
+    }
+    return len(token) >= 3 and token not in generic
 
 
 def _chunk(values: list[Any], size: int) -> list[list[Any]]:
