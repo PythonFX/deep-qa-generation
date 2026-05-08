@@ -25,6 +25,7 @@ class DocumentSection(BaseModel):
     char_end: int
     summary: str | None = None
     keywords: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Concept(BaseModel):
@@ -139,4 +140,3 @@ class DatasetEntry(BaseModel):
     difficulty: str
     answer_requirements: list[str] = Field(default_factory=list)
     unsupported_answer_patterns: list[str] = Field(default_factory=list)
-

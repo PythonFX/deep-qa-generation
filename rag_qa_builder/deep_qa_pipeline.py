@@ -12,7 +12,7 @@ from rag_qa_builder.exporters.jsonl_exporter import export_jsonl
 from rag_qa_builder.llm.prompt_runner import PromptRunner
 from rag_qa_builder.models import DocumentSection
 from rag_qa_builder.readers import read_documents
-from rag_qa_builder.compiler.structure_mapper import map_documents_to_sections
+from rag_qa_builder.compiler.semantic_sectioner import map_documents_to_semantic_sections
 from rag_qa_builder.utils.ids import stable_id
 from rag_qa_builder.utils.text_utils import keywords, normalize_text, similarity, split_sentences, unwrap_line_breaks
 
@@ -171,8 +171,9 @@ class DeepQAPipeline:
 
     def build_structure(self) -> tuple[list, list[DocumentSection]]:
         documents, read_errors = read_documents(self.input_path, self.config.input.file_types, self.config.input.encoding)
-        sections = map_documents_to_sections(documents)
+        cleaned_documents, sections = map_documents_to_semantic_sections(documents, self.config)
         export_json(self.output_dir, "documents.json", documents)
+        export_json(self.output_dir, "documents.cleaned.json", cleaned_documents)
         export_json(self.output_dir, "document_structure.json", sections)
         if read_errors:
             export_jsonl(self.output_dir, "errors.jsonl", read_errors)

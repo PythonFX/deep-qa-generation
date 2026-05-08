@@ -26,6 +26,15 @@ structure:
   min_section_chars: 80
   max_section_chars_for_single_llm_call: 50000
 
+semantic_sectioning:
+  enabled: true
+  min_section_chars: 1200
+  target_section_chars: 3800
+  max_section_chars: 6500
+  target_sections_per_40k_chars: 10
+  target_count_tolerance: 0.35
+  overlap_sentences: 0
+
 concept_extraction:
   max_concepts_per_doc: 80
   min_importance: 0.4
@@ -89,4 +98,3 @@ validation:
   reject_external_knowledge: true
   deduplicate_questions: true
   duplicate_similarity_threshold: 0.88
-

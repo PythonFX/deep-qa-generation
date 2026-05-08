@@ -36,6 +36,16 @@ class StructureConfig(BaseModel):
     max_section_chars_for_single_llm_call: int = 50000
 
 
+class SemanticSectioningConfig(BaseModel):
+    enabled: bool = True
+    min_section_chars: int = 1200
+    target_section_chars: int = 3800
+    max_section_chars: int = 6500
+    target_sections_per_40k_chars: int = 10
+    target_count_tolerance: float = 0.35
+    overlap_sentences: int = 0
+
+
 class ConceptExtractionConfig(BaseModel):
     max_concepts_per_doc: int = 80
     min_importance: float = 0.4
@@ -78,6 +88,7 @@ class AppConfig(BaseModel):
     input: InputConfig = Field(default_factory=InputConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     structure: StructureConfig = Field(default_factory=StructureConfig)
+    semantic_sectioning: SemanticSectioningConfig = Field(default_factory=SemanticSectioningConfig)
     concept_extraction: ConceptExtractionConfig = Field(default_factory=ConceptExtractionConfig)
     fact_extraction: FactExtractionConfig = Field(default_factory=FactExtractionConfig)
     combination: CombinationConfig = Field(default_factory=CombinationConfig)
@@ -92,4 +103,3 @@ def load_config(config_path: str | Path | None) -> AppConfig:
     with path.open("r", encoding="utf-8") as handle:
         raw: dict[str, Any] = yaml.safe_load(handle) or {}
     return AppConfig.model_validate(raw)
-
